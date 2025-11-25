@@ -243,6 +243,11 @@ def main():
         else:
             print(f"  Detected {len(circles)} candidate apples.")
 
+    # Debug: look at the radius distribution (in pixels)
+    radii = circles[:, 2]
+    print(f"  Radii px - min: {radii.min()}, max: {radii.max()}, mean: {radii.mean():.1f}")
+
+
         # 3. Measure per-apple size + redness; create overlay
         result = analyse_apples_for_image(img_path, cropped_bgr, circles)
         rows = result["rows"]
