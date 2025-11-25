@@ -29,4 +29,4 @@ pip install -r requirements.txt
 
 ## Running
 
-SRC\Apple_counter_(v0.1).py
+SRC\apple_counter
