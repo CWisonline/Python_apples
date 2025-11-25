@@ -54,11 +54,11 @@ PX_PER_MM = 1712 / 1220.0  # TODO: update from your ImageJ measurement
 # ---- Hough circle parameters (tune as needed) ----
 # These values are a starting point; you may tweak based on your images.
 DP = 1.2          # Inverse accumulator resolution
-MIN_DIST = 40     # Minimum distance between circle centres (px)
-MIN_RADIUS = 30   # Min radius in pixels (post-scaling/cropping)
-MAX_RADIUS = 60   # Max radius in pixels
-CANNY_HIGH = 100  # Higher threshold for Canny edge detector
-ACCUM_THRESH = 20 # Accumulator threshold for centre detection
+MIN_DIST = 60     # Minimum distance between circle centres (px), e.g. 0.8 * expected mean apple diameter
+MIN_RADIUS = 28   # Min radius in pixels (post-scaling/cropping)
+MAX_RADIUS = 55   # Max radius in pixels
+CANNY_HIGH = 90  # Higher threshold for Canny edge detector
+ACCUM_THRESH = 22 # Accumulator threshold for centre detection
 
 # File suffixes to treat as images
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -242,10 +242,9 @@ def main():
             print("  No apples detected.")
         else:
             print(f"  Detected {len(circles)} candidate apples.")
-
-    # Debug: look at the radius distribution (in pixels)
-    radii = circles[:, 2]
-    print(f"  Radii px - min: {radii.min()}, max: {radii.max()}, mean: {radii.mean():.1f}")
+            # Debug: look at the radius distribution (in pixels)
+            radii = circles[:, 2]
+            print(f"  Radii px - min: {radii.min()}, max: {radii.max()}, mean: {radii.mean():.1f}")
 
 
         # 3. Measure per-apple size + redness; create overlay
