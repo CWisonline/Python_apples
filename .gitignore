@@ -14,7 +14,9 @@ env/
 
 # Data (keep raw images local, not on GitHub)
 DATA/raw/
-DATA/processed/
+DATA/raw_2025/
+DATA/processed
+DATA/processed_2025/
 
 # OS files
 .DS_Store
