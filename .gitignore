@@ -13,10 +13,8 @@ env/
 .vscode/
 
 # Data (keep raw images local, not on GitHub)
-DATA/raw/
-DATA/raw_2025/
-DATA/processed
-DATA/processed_2025/
+DATA/*raw*/
+DATA/*processed*/
 
 # OS files
 .DS_Store
