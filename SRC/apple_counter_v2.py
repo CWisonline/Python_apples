@@ -43,6 +43,7 @@ Usage:  python SRC/apple_counter_v2.py [--raw DIR] [--out DIR] [--corners CSV]
 from __future__ import annotations
 
 import argparse
+import re
 import csv
 from pathlib import Path
 
@@ -59,6 +60,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = PROJECT_ROOT / "DATA" / "raw_2025"
 OUT_DIR = PROJECT_ROOT / "DATA" / "processed_2025"
 CORNERS_CSV = PROJECT_ROOT / "DATA" / "bin_corners.csv"   # optional manual corners
+# Optional reference-code pairs from pair_reference_sheets.py: by default
+# DATA/image_pairs_<raw folder>.csv (named per folder because camera file
+# numbers repeat between seasons).
+
+
+# Optional harvest record (crate weights per tree), used with the pairs file to
+# assign every crate to a photo and compute mean fruit mass. Expected columns:
+# a tree column, optionally a plot column, and one weight column per crate
+# whose name contains the crate letter, e.g. "Fruit_Weight_A_(kg)".
+HARVEST_FILE = None          # e.g. PROJECT_ROOT / "DATA" / "2026.09.05_plumford_harvest_assessment.xlsx"
+HARVEST_SHEET = 0            # sheet name or index
+HARVEST_TREE_COL = "Tree"
+HARVEST_PLOT_COL = "Plot"    # set to None if there is no plot column
+HARVEST_WEIGHT_COL_REGEX = r"Weight_([A-Z])"   # captures the crate letter
+# Flag photos/trees whose mean fruit mass differs from the batch median by more
+# than this factor (e.g. a crate assumed to be in a photo that is really elsewhere)
+MASS_RATIO_LIMIT = 1.5
+
+
+def default_pairs_csv(raw_dir: Path) -> Path:
+    return PROJECT_ROOT / "DATA" / f"image_pairs_{Path(raw_dir).name}.csv"
 
 # Bin outer rim dimensions (mm). Width = the long side (left-right in photos).
 BIN_W_MM = 1220.0
@@ -242,6 +264,20 @@ def detect_bin_corners(img_bgr: np.ndarray, expected_px_per_mm: float | None = N
     info = {f"edge_score_{k}": round(v[2], 3) for k, v in e.items()}
     info["lr_width_error_initial"] = round(float(width_err), 4)
     return corners, qc, info
+
+
+def load_pairs(path: Path):
+    """From image_pairs.csv: ({apple photo: (reference_code, pair_flags, sheet photo)},
+    set of sheet photos). Sheet photos are skipped by the counter."""
+    if not path or not Path(path).exists():
+        return {}, set()
+    df = pd.read_csv(path, dtype=str).fillna("")
+    if "tree_id" not in df:
+        df["tree_id"] = ""
+    codes = {r.filename_2: (r.reference_code, r.flags, r.filename_1, r.tree_id)
+             for r in df.itertuples() if r.filename_2}
+    sheets = {f for f in df.filename_1 if f}
+    return codes, sheets
 
 
 def load_manual_corners(path: Path) -> dict:
@@ -731,12 +767,20 @@ def main(argv=None):
     ap.add_argument("--raw", type=Path, default=RAW_DIR)
     ap.add_argument("--out", type=Path, default=OUT_DIR)
     ap.add_argument("--corners", type=Path, default=CORNERS_CSV)
+    ap.add_argument("--harvest", type=Path, default=HARVEST_FILE,
+                    help="harvest record (xlsx/csv) with crate weights per tree")
+    ap.add_argument("--pairs", type=Path, default=None,
+                    help="pairs CSV from pair_reference_sheets.py; default "
+                         "DATA/image_pairs_<raw folder>.csv, used if it exists")
     args = ap.parse_args(argv)
+    args.pairs = args.pairs or default_pairs_csv(args.raw)
     args.out.mkdir(parents=True, exist_ok=True)
 
     manual = load_manual_corners(args.corners)
-    paths = list_images(args.raw)
-    print(f"Found {len(paths)} images in {args.raw}  (manual corners for {len(manual)})")
+    pair_codes, sheet_photos = load_pairs(args.pairs)
+    paths = [p for p in list_images(args.raw) if p.name not in sheet_photos]
+    print(f"Found {len(paths)} images in {args.raw}  (manual corners for {len(manual)}"
+          + (f"; {len(sheet_photos)} reference-sheet photos skipped" if sheet_photos else "") + ")")
     print("Detecting bins...")
     bins, typical = detect_all_bins(paths, manual)
     if typical:
@@ -751,10 +795,16 @@ def main(argv=None):
             continue
         print(f"  {p.name}: {s['n_apples']} apples ({s['n_rejected']} rejected), "
               f"median d={s['median_diameter_eq_mm']:.1f} mm, bin={s['bin_qc']}")
+        code, pflags, sheet_photo, tree = pair_codes.get(p.name, ("", "", "", ""))
+        for r in rows:
+            r["reference_code"] = code
+            r["tree_id"] = tree
+        s = {"filename": s.pop("filename"), "tree_id": tree, "reference_code": code,
+             "sheet_photo": sheet_photo, "pair_flags": pflags, **s}
         all_rows.extend(rows)
         summaries.append(s)
 
-    cols = ["filename", "n_apples_in_image", "apple_number", "x_mm", "y_mm",
+    cols = ["filename", "tree_id", "reference_code", "n_apples_in_image", "apple_number", "x_mm", "y_mm",
             "diameter_eq_mm", "diameter_major_mm", "diameter_minor_mm",
             "diameter_eq_mm_uncorrected", "diameter_major_mm_uncorrected",
             "solidity", "free_outline_fraction", "small_or_partial", "L_star", "a_star", "b_star",
@@ -762,6 +812,188 @@ def main(argv=None):
     pd.DataFrame(all_rows, columns=cols).to_csv(args.out / "apples_results.csv", index=False)
     pd.DataFrame(summaries).to_csv(args.out / "image_summary.csv", index=False)
     print(f"Wrote {len(all_rows)} apples to {args.out / 'apples_results.csv'}")
+    if pair_codes:
+        apples_df, images_df = pd.DataFrame(all_rows, columns=cols), pd.DataFrame(summaries)
+        if args.harvest:
+            record = load_harvest(args.harvest)
+            crates_df, images_df, ts = reconcile_harvest(record, images_df, apples_df)
+            crates_df.to_csv(args.out / "crate_assignment.csv", index=False)
+            images_df.to_csv(args.out / "image_summary.csv", index=False)   # adds crate/mass columns
+            print(f"Wrote {len(crates_df)} crates to {args.out / 'crate_assignment.csv'}")
+        else:
+            ts = tree_summary(apples_df, images_df)
+        ts.to_csv(args.out / "tree_summary.csv", index=False)
+        print(f"Wrote {len(ts)} trees to {args.out / 'tree_summary.csv'}")
+
+
+def load_harvest(path: Path) -> pd.DataFrame:
+    """Harvest record -> long table: tree_id, plot, crate, weight_kg (one row per crate)."""
+    path = Path(path)
+    df = (pd.read_excel(path, sheet_name=HARVEST_SHEET) if path.suffix.lower() in (".xlsx", ".xls")
+          else pd.read_csv(path))
+    wcols = {c: m.group(1) for c in df.columns
+             if (m := re.search(HARVEST_WEIGHT_COL_REGEX, str(c)))}
+    if not wcols:
+        raise ValueError(f"No crate weight columns matching {HARVEST_WEIGHT_COL_REGEX!r} in {path}")
+    rows = []
+    for _, r in df.iterrows():
+        t = r[HARVEST_TREE_COL]
+        tree = str(int(t)) if isinstance(t, (int, float)) and float(t).is_integer() else str(t).strip()
+        for col, crate in wcols.items():
+            if pd.notna(r[col]):
+                rows.append(dict(tree_id=tree, plot=(r[HARVEST_PLOT_COL] if HARVEST_PLOT_COL else ""),
+                                 crate=crate, weight_kg=float(r[col])))
+    return pd.DataFrame(rows)
+
+
+def reconcile_harvest(record: pd.DataFrame, images: pd.DataFrame, apples: pd.DataFrame):
+    """Assign every crate in the harvest record to an apple photo.
+
+    * A crate whose label was read on a sheet photo is assigned to the paired
+      apple photo ("labelled").
+    * A crate whose label was not read anywhere is assumed to have been tipped
+      into the tree's photo, if the tree has exactly one photo ("assumed_merged").
+      If the tree has several photos the crate cannot be placed ("ambiguous");
+      if it has none, it is "not_photographed".
+    * Codes read from sheets but absent from the record are reported
+      ("not_in_record": a misread label or an incomplete record).
+    The crate weights in each photo give its mean fruit mass (kg / apples),
+    a check on the count and on the assumptions above.
+
+    Returns (crate_assignment, images with crate/mass columns, tree_summary).
+    """
+    images = images.copy()
+    photos = images[images["reference_code"].fillna("") != ""]
+    labelled = {}                                    # (tree, crate) -> [photos]
+    for _, im in photos.iterrows():
+        for code in str(im["reference_code"]).split(";"):
+            m = re.match(r"^(\d+)([A-Za-z]+)$", code.strip())
+            if m:
+                labelled.setdefault((m.group(1), m.group(2).upper()), []).append(im["filename"])
+    rec_keys = set(zip(record["tree_id"], record["crate"]))
+    tree_photos = {}
+    for (t, _c), fs in labelled.items():
+        tree_photos.setdefault(t, set()).update(fs)
+
+    rows = []
+    for _, r in record.iterrows():
+        key = (r["tree_id"], r["crate"])
+        fs = labelled.get(key, [])
+        tp = sorted(tree_photos.get(r["tree_id"], []))
+        if fs:
+            status, photo = ("labelled" if len(fs) == 1 else "labelled_in_several_photos"), fs[0]
+        elif len(tp) == 1:
+            status, photo = "assumed_merged", tp[0]
+        elif len(tp) > 1:
+            status, photo = "ambiguous", ""
+        else:
+            status, photo = "not_photographed", ""
+        rows.append(dict(tree_id=r["tree_id"], plot=r["plot"], crate=r["crate"],
+                         code=f'{r["tree_id"]}{r["crate"]}', weight_kg=r["weight_kg"],
+                         photo=photo, status=status))
+    plots = dict(zip(record["tree_id"], record["plot"]))
+    for (t, c), fs in labelled.items():
+        if (t, c) not in rec_keys:
+            rows.append(dict(tree_id=t, plot=plots.get(t, ""), crate=c, code=f"{t}{c}", weight_kg=np.nan,
+                             photo=fs[0], status="not_in_record"))
+    crates = pd.DataFrame(rows)
+
+    # per photo: crates, weight and mean fruit mass
+    assigned = crates[crates["photo"] != ""]
+    per_photo = assigned.groupby("photo").agg(
+        crates_assigned=("code", lambda x: ";".join(sorted(x))),
+        crate_weight_kg=("weight_kg", lambda x: x.sum(min_count=1)),
+        crate_status=("status", lambda x: ";".join(sorted(set(x)))))
+    images = images.drop(columns=[c for c in per_photo.columns if c in images], errors="ignore")
+    images = images.merge(per_photo, left_on="filename", right_index=True, how="left")
+    images["mean_fruit_mass_g"] = 1000 * images["crate_weight_kg"] / images["n_apples"].where(images["n_apples"] > 0)
+    # reference: photos whose crates were all identified from labels (no assumptions)
+    trusted = images.loc[images["crate_status"] == "labelled", "mean_fruit_mass_g"].dropna()
+    med = trusted.median() if len(trusted) else images["mean_fruit_mass_g"].median()
+    images["mass_ratio_to_median"] = images["mean_fruit_mass_g"] / med
+    ratio = images["mean_fruit_mass_g"] / med
+    images["mass_check"] = np.where((ratio > MASS_RATIO_LIMIT) | (ratio < 1 / MASS_RATIO_LIMIT), "check_mass", "")
+
+    # per tree: every tree in the record, plus trees only seen on labels
+    out = []
+    for tree in list(dict.fromkeys(list(record["tree_id"]) + sorted({t for t, _ in labelled}))):
+        cr = crates[crates["tree_id"] == tree]
+        ims = images[images["filename"].isin(set(cr["photo"]) - {""})]
+        a = apples[apples["filename"].isin(ims["filename"])]
+        full = a[~a["small_or_partial"].astype(bool)] if len(a) else a
+        w_rec = cr.loc[cr["status"] != "not_in_record", "weight_kg"].sum()
+        w_ph = cr.loc[cr["photo"] != "", "weight_kg"].sum(min_count=1)
+        n = len(a)
+        flags = set()
+        for st in cr["status"]:
+            if st not in ("labelled", "assumed_merged"):
+                flags.add(st)
+        if "assumed_merged" in set(cr["status"]):
+            flags.add("assumed_merged")
+        for pf in ims.get("pair_flags", pd.Series(dtype=str)).fillna(""):
+            flags.update(f for f in str(pf).split(";") if f)
+        for q in ims.get("bin_qc", pd.Series(dtype=str)):
+            if q not in ("auto_ok", "manual"):
+                flags.add(f"bin:{q}")
+        mass = 1000 * w_ph / n if n and pd.notna(w_ph) else np.nan
+        if pd.notna(mass) and (mass / med > MASS_RATIO_LIMIT or mass / med < 1 / MASS_RATIO_LIMIT):
+            flags.add("check_mass")
+        out.append(dict(
+            plot=plots.get(tree, ""), tree_id=tree,
+            crates_in_record=";".join(cr.loc[cr["status"] != "not_in_record", "code"]),
+            crates_labelled=";".join(cr.loc[cr["status"].str.startswith("labelled") |
+                                            (cr["status"] == "not_in_record"), "code"]),
+            crates_assumed=";".join(cr.loc[cr["status"] == "assumed_merged", "code"]),
+            n_photos=len(ims), photos=";".join(ims["filename"]),
+            total_weight_kg=w_rec if w_rec else np.nan,
+            weight_photographed_kg=w_ph,
+            n_apples=n if n else np.nan,
+            n_small_or_partial=int(a["small_or_partial"].astype(bool).sum()) if n else np.nan,
+            mean_fruit_mass_g=mass,
+            median_diameter_eq_mm=full["diameter_eq_mm"].median() if n else np.nan,
+            mean_diameter_eq_mm=full["diameter_eq_mm"].mean() if n else np.nan,
+            sd_diameter_eq_mm=full["diameter_eq_mm"].std() if n else np.nan,
+            median_diameter_major_mm=full["diameter_major_mm"].median() if n else np.nan,
+            mean_blush_fraction=a["blush_fraction"].mean() if n else np.nan,
+            mean_hue_angle_deg=a["hue_angle_deg"].mean() if n else np.nan,
+            flags=";".join(sorted(flags)),
+        ))
+    return crates, images, pd.DataFrame(out)
+
+
+def tree_summary(apples: pd.DataFrame, images: pd.DataFrame) -> pd.DataFrame:
+    """One row per tree, combining all of its crates and photos.
+    Size statistics exclude small_or_partial apples (as in image_summary)."""
+    apples = apples[apples["tree_id"].fillna("") != ""]
+    images = images[images.get("tree_id", pd.Series(dtype=str)).fillna("") != ""]
+    out = []
+    for tree, a in apples.groupby("tree_id", sort=False):
+        im = images[images["tree_id"] == tree]
+        full = a[~a["small_or_partial"].astype(bool)]
+        codes = sorted({c for rc in im["reference_code"] for c in str(rc).split(";") if c})
+        flags = sorted({f for pf in im["pair_flags"].fillna("") for f in str(pf).split(";") if f}
+                       | {f"bin:{q}" for q in im["bin_qc"] if q not in ("auto_ok", "manual")})
+        out.append(dict(
+            tree_id=tree,
+            crates=";".join(codes),
+            n_photos=len(im),
+            photos=";".join(im["filename"]),
+            n_apples=len(a),
+            n_small_or_partial=int(a["small_or_partial"].astype(bool).sum()),
+            median_diameter_eq_mm=full["diameter_eq_mm"].median(),
+            mean_diameter_eq_mm=full["diameter_eq_mm"].mean(),
+            sd_diameter_eq_mm=full["diameter_eq_mm"].std(),
+            median_diameter_major_mm=full["diameter_major_mm"].median(),
+            mean_blush_fraction=a["blush_fraction"].mean(),
+            mean_hue_angle_deg=a["hue_angle_deg"].mean(),
+            flags=";".join(flags),
+        ))
+    ts = pd.DataFrame(out)
+    if len(ts):
+        # a tree id that is not purely numeric (e.g. "3;20" from mixed_trees) sorts last
+        ts["_k"] = pd.to_numeric(ts["tree_id"], errors="coerce")
+        ts = ts.sort_values(["_k", "tree_id"]).drop(columns="_k")
+    return ts
 
 
 if __name__ == "__main__":
