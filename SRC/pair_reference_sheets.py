@@ -73,8 +73,8 @@ RAW_DIR = A.RAW_DIR
 # between seasons): DATA/image_pairs_<raw folder>.csv, DATA/reference_codes_<raw folder>/
 
 # Set this if Tesseract is not on the PATH, e.g.
-# r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-TESSERACT_CMD = None
+#  r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Reference code = tree number + crate letter (e.g. "20A", "20B": tree 20,
 # crates A and B). If trees can have more crates, add the letters to BOTH
