@@ -1,15 +1,23 @@
-"""
+r"""
 Manually mark (or correct) the four outer rim corners of the apple bin.
 
-Writes/updates DATA/bin_corners.csv, which apple_counter_v2.py uses in
-preference to automatic rim detection for any image listed in it.
+Writes/updates DATA/bin_corners_<raw folder>.csv, which apple_counter_v2.py
+uses (for the same --raw folder) in preference to automatic rim detection for
+any image listed in it.
 
-Usage
+Usage (from the repository folder; Windows paths shown)
 -----
-    python SRC/click_bin_corners.py                 # all images in RAW_DIR
-    python SRC/click_bin_corners.py DSCN9917.JPG    # just these files
-    python SRC/click_bin_corners.py --flagged       # only images whose bin_qc
-                                                    # in image_summary.csv is not auto_ok
+  All images in a folder:
+    python SRC\click_bin_corners.py --raw DATA\raw_test_bin
+
+  Only images flagged by a previous counter run (bin_qc not auto_ok), using
+  the image_summary.csv in that run's output folder:
+    python SRC\click_bin_corners.py --raw DATA\raw_test_bin --out DATA\processed_v2 --flagged
+
+  Particular images:
+    python SRC\click_bin_corners.py --raw DATA\raw_test_bin DSCN9917.JPG DSCN9939.JPG
+
+  Then re-run the counter with the same --raw folder; it picks the corners up.
 
 In the window
 -------------
@@ -103,20 +111,34 @@ def annotate(img, auto):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("files", nargs="*")
-    ap.add_argument("--raw", type=Path, default=ac.RAW_DIR)
-    ap.add_argument("--corners", type=Path, default=ac.CORNERS_CSV)
+    ap.add_argument("files", nargs="*", help="image file names in --raw (default: all images)")
+    ap.add_argument("--raw", type=Path, default=ac.RAW_DIR, help="folder of original photos")
+    ap.add_argument("--out", type=Path, default=ac.OUT_DIR,
+                    help="output folder of a previous counter run (holds image_summary.csv); used with --flagged")
+    ap.add_argument("--corners", type=Path, default=None,
+                    help="corners CSV to write; default DATA/bin_corners_<raw folder>.csv")
     ap.add_argument("--flagged", action="store_true",
-                    help="only images not flagged auto_ok in OUT_DIR/image_summary.csv")
+                    help="only images whose bin_qc in <out>/image_summary.csv is not auto_ok")
     args = ap.parse_args()
+    args.corners = args.corners or ac.default_corners_csv(args.raw)
+    if not args.raw.is_dir():
+        sys.exit(f"Image folder not found: {args.raw.resolve()}")
+    for f in args.files:
+        if not (args.raw / f).is_file():
+            sys.exit(f"Image not found: {(args.raw / f).resolve()}\n"
+                     "(Positional arguments are image file names; use --out for the results folder.)")
 
     paths = [args.raw / f for f in args.files] if args.files else ac.list_images(args.raw)
     if args.flagged:
-        summ = pd.read_csv(ac.OUT_DIR / "image_summary.csv")
+        summ_path = args.out / "image_summary.csv"
+        if not summ_path.is_file():
+            sys.exit(f"--flagged needs {summ_path.resolve()}\n"
+                     "Run apple_counter_v2.py first, and give its output folder with --out.")
+        summ = pd.read_csv(summ_path)
         bad = set(summ.loc[summ.bin_qc != "auto_ok", "filename"])
         paths = [p for p in paths if p.name in bad]
     rows = load(args.corners)
-    print(f"{len(paths)} images to review; corners file: {args.corners}")
+    print(f"{len(paths)} images to review; corners file: {args.corners.resolve()}")
     for p in paths:
         img = cv2.imread(str(p))
         if img is None:

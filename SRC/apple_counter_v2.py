@@ -59,7 +59,8 @@ from skimage.segmentation import watershed
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = PROJECT_ROOT / "DATA" / "raw_2025"
 OUT_DIR = PROJECT_ROOT / "DATA" / "processed_2025"
-CORNERS_CSV = PROJECT_ROOT / "DATA" / "bin_corners.csv"   # optional manual corners
+# Manual corners (click_bin_corners.py): DATA/bin_corners_<raw folder>.csv by
+# default, named per folder because camera file numbers repeat between seasons.
 # Optional reference-code pairs from pair_reference_sheets.py: by default
 # DATA/image_pairs_<raw folder>.csv (named per folder because camera file
 # numbers repeat between seasons).
@@ -77,6 +78,10 @@ HARVEST_WEIGHT_COL_REGEX = r"Weight_([A-Z])"   # captures the crate letter
 # Flag photos/trees whose mean fruit mass differs from the batch median by more
 # than this factor (e.g. a crate assumed to be in a photo that is really elsewhere)
 MASS_RATIO_LIMIT = 1.5
+
+
+def default_corners_csv(raw_dir: Path) -> Path:
+    return PROJECT_ROOT / "DATA" / f"bin_corners_{Path(raw_dir).name}.csv"
 
 
 def default_pairs_csv(raw_dir: Path) -> Path:
@@ -266,17 +271,47 @@ def detect_bin_corners(img_bgr: np.ndarray, expected_px_per_mm: float | None = N
     return corners, qc, info
 
 
+def _normalise_codes(text) -> list:
+    """'20a, 20B' / '20A+20B' / ' 20A;20B ' -> ['20A', '20B']"""
+    return [c for c in re.split(r"[;,+/&\s]+", str(text).strip().upper()) if c]
+
+
 def load_pairs(path: Path):
-    """From image_pairs.csv: ({apple photo: (reference_code, pair_flags, sheet photo)},
-    set of sheet photos). Sheet photos are skipped by the counter."""
+    """Read a pairs file: the output of pair_reference_sheets.py, or a file made
+    by hand (CSV or Excel) with at least the columns
+        filename_1      photo with the reference sheet (may be left empty)
+        filename_2      apple photo
+        reference_code  crate code(s), e.g. 20A or "20A, 20B"
+    Optional columns: tree_id (derived from the codes if absent) and flags.
+    Returns ({apple photo: (codes, flags, sheet photo, tree_id)}, set of sheet photos);
+    sheet photos are skipped by the counter."""
     if not path or not Path(path).exists():
         return {}, set()
-    df = pd.read_csv(path, dtype=str).fillna("")
-    if "tree_id" not in df:
-        df["tree_id"] = ""
-    codes = {r.filename_2: (r.reference_code, r.flags, r.filename_1, r.tree_id)
-             for r in df.itertuples() if r.filename_2}
-    sheets = {f for f in df.filename_1 if f}
+    path = Path(path)
+    df = (pd.read_excel(path, dtype=str) if path.suffix.lower() in (".xlsx", ".xls")
+          else pd.read_csv(path, dtype=str)).fillna("")
+    df.columns = [str(c).strip() for c in df.columns]
+    missing = {"filename_2", "reference_code"} - set(df.columns)
+    if missing:
+        raise ValueError(f"{path}: missing column(s) {sorted(missing)}")
+    for col in ("filename_1", "flags", "tree_id"):
+        if col not in df:
+            df[col] = ""
+    codes, sheets = {}, set()
+    for r in df.itertuples():
+        f2 = r.filename_2.strip()
+        if r.filename_1.strip():
+            sheets.add(r.filename_1.strip())
+        if not f2:
+            continue
+        cl = _normalise_codes(r.reference_code)
+        tree = r.tree_id.strip() or ";".join(dict.fromkeys(
+            m.group(1) for c in cl if (m := re.match(r"^(\d+)", c))))
+        if f2 in codes:   # the same apple photo listed twice: combine its codes
+            prev = codes[f2]
+            cl = list(dict.fromkeys(prev[0].split(";") + cl))
+            tree = ";".join(dict.fromkeys([t for t in (prev[3] + ";" + tree).split(";") if t]))
+        codes[f2] = (";".join(cl), r.flags.strip(), r.filename_1.strip(), tree)
     return codes, sheets
 
 
@@ -766,7 +801,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--raw", type=Path, default=RAW_DIR)
     ap.add_argument("--out", type=Path, default=OUT_DIR)
-    ap.add_argument("--corners", type=Path, default=CORNERS_CSV)
+    ap.add_argument("--corners", type=Path, default=None,
+                    help="manual corners CSV; default DATA/bin_corners_<raw folder>.csv, used if it exists")
     ap.add_argument("--harvest", type=Path, default=HARVEST_FILE,
                     help="harvest record (xlsx/csv) with crate weights per tree")
     ap.add_argument("--pairs", type=Path, default=None,
@@ -776,6 +812,7 @@ def main(argv=None):
     args.pairs = args.pairs or default_pairs_csv(args.raw)
     args.out.mkdir(parents=True, exist_ok=True)
 
+    args.corners = args.corners or default_corners_csv(args.raw)
     manual = load_manual_corners(args.corners)
     pair_codes, sheet_photos = load_pairs(args.pairs)
     paths = [p for p in list_images(args.raw) if p.name not in sheet_photos]
