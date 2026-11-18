@@ -21,6 +21,9 @@ Usage (from the repository folder; Windows paths shown)
 
 In the window
 -------------
+  * The window is sized to fit your screen (use --scale 0.2, say, if it is
+    still too big or small). A magnifier near the cursor shows the photo at
+    full resolution: aim the cross hair at the corner, then click.
   * The automatic estimate is drawn in yellow.
   * Click the 4 OUTER rim corners in order: top-left, top-right,
     bottom-right, bottom-left. Where a corner is hidden under a pole, click
@@ -44,7 +47,9 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import apple_counter_v2 as ac  # noqa: E402
 
-DISPLAY_W = 1600
+SCREEN_FILL_W, SCREEN_FILL_H = 0.90, 0.85   # fraction of the screen the window may use
+MAG_SIZE = 220        # magnifier box on screen (px)
+MAG_ZOOM_FULLRES = 1  # magnifier shows the photo at this many screen px per photo px
 FIELDS = ["filename", "tl_x", "tl_y", "tr_x", "tr_y", "br_x", "br_y", "bl_x", "bl_y"]
 NAMES = ["top-left", "top-right", "bottom-right", "bottom-left"]
 
@@ -67,30 +72,89 @@ def save(path, rows):
             w.writerow(rows[k])
 
 
-def annotate(img, auto):
-    s = DISPLAY_W / img.shape[1]
+def screen_size():
+    """Usable screen size in the units OpenCV windows use (logical pixels)."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+        return w, h
+    except Exception:
+        return 1280, 720
+
+
+def annotate(img, auto, scale=None):
+    H0, W0 = img.shape[:2]
+    if scale is None:
+        sw, sh = screen_size()
+        scale = min(SCREEN_FILL_W * sw / W0, SCREEN_FILL_H * sh / H0)
+    s = scale
     base = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    bh, bw = base.shape[:2]
+    fs = max(0.45, bw / 1800)                # text size relative to the window
+    th = 1
+    banner = int(34 * fs / 0.55)             # height of the instruction strip
     clicks = []
+    cursor = [None]
+    mag = min(MAG_SIZE, bw // 3, bh // 3)    # magnifier size on screen
+    half = int(mag / (2 * MAG_ZOOM_FULLRES))  # half-width of the magnified photo region (photo px)
+    pad_img = cv2.copyMakeBorder(img, half, half, half, half, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+    auto_full = np.asarray(auto, float)
+
+    def magnifier(x, y):
+        fx, fy = int(round(x / s)), int(round(y / s))   # photo coordinates
+        crop = pad_img[fy:fy + 2 * half, fx:fx + 2 * half].copy()
+        # draw the automatic outline and clicks in photo coordinates
+        off = np.array([fx - half, fy - half], float)
+        cv2.polylines(crop, [np.round(auto_full - off).astype(np.int32)], True, (0, 255, 255), 2)
+        for p in clicks:
+            q = np.round(np.array(p) / s - off).astype(int)
+            cv2.circle(crop, tuple(q), 8, (0, 0, 255), 2)
+        m = cv2.resize(crop, (mag, mag), interpolation=cv2.INTER_NEAREST)
+        c0 = mag // 2
+        cv2.line(m, (c0, 0), (c0, mag), (0, 255, 0), 1)
+        cv2.line(m, (0, c0), (mag, c0), (0, 255, 0), 1)
+        cv2.rectangle(m, (0, 0), (mag - 1, mag - 1), (255, 255, 255), 2)
+        return m
 
     def redraw():
         v = base.copy()
-        cv2.polylines(v, [np.round(auto * s).astype(np.int32)], True, (0, 255, 255), 1)
+        cv2.polylines(v, [np.round(auto_full * s).astype(np.int32)], True, (0, 255, 255), 1)
         for i, p in enumerate(clicks):
             cv2.circle(v, p, 6, (0, 0, 255), 2)
-            cv2.putText(v, NAMES[i], (p[0] + 8, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.putText(v, NAMES[i], (p[0] + 8, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), th)
         if len(clicks) > 1:
             cv2.polylines(v, [np.array(clicks, np.int32)], len(clicks) == 4, (0, 0, 255), 2)
-        msg = (f"click {NAMES[len(clicks)]}" if len(clicks) < 4 else "Enter = accept") + \
-              "   |  Enter=accept  Backspace=undo  s=skip  Esc=quit"
-        cv2.putText(v, msg, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if cursor[0] is not None:
+            x, y = cursor[0]
+            m = magnifier(x, y)
+            # put the magnifier in the corner furthest from the cursor
+            mx = 10 if x > bw / 2 else bw - mag - 10
+            my = banner + 10 if y > bh / 2 else bh - mag - 10
+            v[my:my + mag, mx:mx + mag] = m
+        step = (f"Click {NAMES[len(clicks)].upper()} corner ({len(clicks) + 1}/4)" if len(clicks) < 4
+                else "Press Enter to accept")
+        keys = "Enter=accept  Backspace=undo  s=skip  Esc=quit"
+        cv2.rectangle(v, (0, 0), (bw, banner), (40, 40, 40), -1)
+        y_txt = int(banner * 0.68)
+        cv2.putText(v, step, (10, y_txt), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 255), th + 1, cv2.LINE_AA)
+        (tw, _), _ = cv2.getTextSize(keys, cv2.FONT_HERSHEY_SIMPLEX, fs * 0.85, th)
+        cv2.putText(v, keys, (bw - tw - 10, y_txt), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.85, (255, 255, 255), th,
+                    cv2.LINE_AA)
         cv2.imshow("bin corners", v)
 
     def on_mouse(ev, x, y, flags, param):
-        if ev == cv2.EVENT_LBUTTONDOWN and len(clicks) < 4:
+        if ev == cv2.EVENT_MOUSEMOVE:
+            cursor[0] = (x, y)
+            redraw()
+        elif ev == cv2.EVENT_LBUTTONDOWN and len(clicks) < 4:
             clicks.append((x, y))
             redraw()
 
-    cv2.namedWindow("bin corners", cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow("bin corners", cv2.WINDOW_AUTOSIZE)   # 1 window px = 1 image px: clicks map exactly
+    cv2.moveWindow("bin corners", 0, 0)
     cv2.setMouseCallback("bin corners", on_mouse)
     redraw()
     while True:
@@ -117,6 +181,8 @@ def main():
                     help="output folder of a previous counter run (holds image_summary.csv); used with --flagged")
     ap.add_argument("--corners", type=Path, default=None,
                     help="corners CSV to write; default DATA/bin_corners_<raw folder>.csv")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="display scale (e.g. 0.2); default: fit the screen")
     ap.add_argument("--flagged", action="store_true",
                     help="only images whose bin_qc in <out>/image_summary.csv is not auto_ok")
     args = ap.parse_args()
@@ -149,7 +215,7 @@ def main():
             auto = np.array([[float(r[f"{c}_x"]), float(r[f"{c}_y"])] for c in ("tl", "tr", "br", "bl")])
         else:
             auto, _, _ = ac.detect_bin_corners(img)
-        res = annotate(img, auto)
+        res = annotate(img, auto, args.scale)
         if isinstance(res, str) and res == "quit":
             break
         if isinstance(res, str) and res == "skip":
