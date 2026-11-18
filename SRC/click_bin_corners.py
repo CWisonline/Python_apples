@@ -85,7 +85,7 @@ def screen_size():
         return 1280, 720
 
 
-def annotate(img, auto, scale=None):
+def annotate(img, auto, scale=None, label=""):
     H0, W0 = img.shape[:2]
     if scale is None:
         sw, sh = screen_size()
@@ -139,7 +139,13 @@ def annotate(img, auto, scale=None):
         keys = "Enter=accept  Backspace=undo  s=skip  Esc=quit"
         cv2.rectangle(v, (0, 0), (bw, banner), (40, 40, 40), -1)
         y_txt = int(banner * 0.68)
-        cv2.putText(v, step, (10, y_txt), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 255), th + 1, cv2.LINE_AA)
+        if label:   # file name and progress, e.g. "DSCN9917.JPG  (3 of 12)"
+            cv2.putText(v, label, (10, y_txt), cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), th + 1, cv2.LINE_AA)
+            (lw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, th + 1)
+            step_x = 10 + lw + int(25 * fs / 0.55)
+        else:
+            step_x = 10
+        cv2.putText(v, step, (step_x, y_txt), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 255), th + 1, cv2.LINE_AA)
         (tw, _), _ = cv2.getTextSize(keys, cv2.FONT_HERSHEY_SIMPLEX, fs * 0.85, th)
         cv2.putText(v, keys, (bw - tw - 10, y_txt), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.85, (255, 255, 255), th,
                     cv2.LINE_AA)
@@ -154,6 +160,11 @@ def annotate(img, auto, scale=None):
             redraw()
 
     cv2.namedWindow("bin corners", cv2.WINDOW_AUTOSIZE)   # 1 window px = 1 image px: clicks map exactly
+    if label:
+        try:
+            cv2.setWindowTitle("bin corners", f"bin corners - {label}")
+        except Exception:
+            pass
     cv2.moveWindow("bin corners", 0, 0)
     cv2.setMouseCallback("bin corners", on_mouse)
     redraw()
@@ -205,7 +216,7 @@ def main():
         paths = [p for p in paths if p.name in bad]
     rows = load(args.corners)
     print(f"{len(paths)} images to review; corners file: {args.corners.resolve()}")
-    for p in paths:
+    for n_img, p in enumerate(paths, start=1):
         img = cv2.imread(str(p))
         if img is None:
             print(f"  cannot read {p}")
@@ -215,7 +226,7 @@ def main():
             auto = np.array([[float(r[f"{c}_x"]), float(r[f"{c}_y"])] for c in ("tl", "tr", "br", "bl")])
         else:
             auto, _, _ = ac.detect_bin_corners(img)
-        res = annotate(img, auto, args.scale)
+        res = annotate(img, auto, args.scale, label=f"{p.name}  ({n_img} of {len(paths)})")
         if isinstance(res, str) and res == "quit":
             break
         if isinstance(res, str) and res == "skip":
